@@ -70,7 +70,7 @@ def noise2array(x: np.ndarray, y: np.ndarray) -> np.ndarray:
     array([[ 0.00449931, -0.01807883],
            [-0.00203524, -0.02358477]])
     """
-    return _default.noise2array(x, y)
+    return _default.noise2array(x.flatten(), y.flatten()).reshape(x.shape)
 
 
 def noise3(x: float, y: float, z: float) -> float:

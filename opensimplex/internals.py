@@ -49,7 +49,7 @@ def _init(seed):
 @njit(cache=True)
 def _extrapolate2(perm, xsb, ysb, dx, dy):
     index = perm[(perm[xsb & 0xFF] + ysb) & 0xFF] & 0x0E
-    g1, g2 = GRADIENTS2[index : index + 2]
+    g1, g2 = GRADIENTS2[index], GRADIENTS2[index + 1]
     return g1 * dx + g2 * dy
 
 
@@ -69,12 +69,84 @@ def _extrapolate4(perm, xsb, ysb, zsb, wsb, dx, dy, dz, dw):
 
 @njit(cache=True, parallel=True)
 def _noise2a(x, y, perm):
-    noise = np.empty((y.size, x.size), dtype=np.double)
-    for y_i in prange(y.size):
-        for x_i in prange(x.size):
-            noise[y_i, x_i] = _noise2(x[x_i], y[y_i], perm)
-    return noise
+    # Place input coordinates onto grid.
 
+    stretch_offset = (x + y) * STRETCH_CONSTANT2
+    xs = x + stretch_offset
+    ys = y + stretch_offset
+
+    # Floor to get grid coordinates of rhombus (stretched square) super-cell origin.
+    xsb = np.floor(xs).astype(np.int64)
+    ysb = np.floor(ys).astype(np.int64)
+
+    # Skew out to get actual coordinates of rhombus origin. We'll need these later.
+    squish_offset = (xsb + ysb) * SQUISH_CONSTANT2
+    xb = xsb + squish_offset
+    yb = ysb + squish_offset
+
+    # Compute grid coordinates relative to rhombus origin.
+    xins = xs - xsb
+    yins = ys - ysb
+
+    # Sum those together to get a value that determines which region we're in.
+    in_sum = xins + yins
+
+    # Positions relative to origin point.
+    dx0 = x - xb
+    dy0 = y - yb
+
+    value = np.zeros_like(x)
+
+    # Contribution (1,0)
+    dx1 = dx0 - 1 - SQUISH_CONSTANT2
+    dy1 = dy0 - 0 - SQUISH_CONSTANT2
+    attn1 = 2 - dx1 * dx1 - dy1 * dy1
+    mask = attn1 > 0
+    attn1 *= attn1 * mask + (1 - mask)
+    e = _extrapolate2(perm, xsb + 1, ysb, dx1, dy1)
+    value += attn1 * attn1 * e * mask
+
+    # Contribution (0,1)
+    dx2 = dx0 - 0 - SQUISH_CONSTANT2
+    dy2 = dy0 - 1 - SQUISH_CONSTANT2
+    attn2 = 2 - dx2 * dx2 - dy2 * dy2
+
+    mask = attn2 > 0
+    attn2 *= attn2 * mask + (1 - mask)
+    value += attn2 * attn2 * _extrapolate2(perm, xsb, ysb + 1, dx2, dy2) * mask
+
+    xgy = xins > yins
+
+    m1 = in_sum <= 1
+    zins = (1 - in_sum) * m1
+    a1 = np.logical_or(zins > xins, zins > yins)
+    a2 = 2 * xgy - 1
+
+    m1_n = (1 - m1)  # REMOVE
+    zins = (2 - in_sum) * (1 - m1)
+    b1 = np.logical_or(zins < xins, zins < yins)
+
+    xsv_ext = xsb + (1 - (a2 + 1) * (b1 + a1)) * m1 + (a2 + 1) * b1
+    ysv_ext = ysb + (1 + (a2 + 1) * (b1 + a1)) * m1 - (a2 - 1) * b1
+    dx_ext = dx0 + ((1 - a2 + 2 * SQUISH_CONSTANT2) * a1 + (a2 + 2 * SQUISH_CONSTANT2 + 1) * b1 - 2 * SQUISH_CONSTANT2 - 1) * m1 - (a2 + 2 * SQUISH_CONSTANT2 + 1) * b1
+    dy_ext = dy0 + ((a2 + 2 * SQUISH_CONSTANT2 + 1) * a1 - (a2 - 2 * SQUISH_CONSTANT2 - 3) * b1 - 2 * SQUISH_CONSTANT2 - 1) * m1 + (a2 - 2 * SQUISH_CONSTANT2 + 3) * b1
+    
+    dx0 -= (1 + 2 * SQUISH_CONSTANT2) * m1_n
+    dy0 -= (1 + 2 * SQUISH_CONSTANT2) * m1_n
+
+    # Contribution (0,0) or (1,1)
+    attn0 = 2 - dx0 * dx0 - dy0 * dy0
+    mask = attn0 > 0
+    attn0 *= attn0 * mask + (1 - mask)
+    value += attn0 * attn0 * _extrapolate2(perm, xsb + m1_n, ysb + m1_n, dx0, dy0) * mask
+
+    # Extra Vertex
+    attn_ext = 2 - dx_ext * dx_ext - dy_ext * dy_ext
+    mask = attn_ext > 0
+    attn_ext *= attn_ext * mask + (1 - mask)
+    value += attn_ext * attn_ext * _extrapolate2(perm, xsv_ext, ysv_ext, dx_ext, dy_ext) * mask
+
+    return value / NORM_CONSTANT2
 
 @njit(cache=True, parallel=True)
 def _noise3a(x, y, z, perm, perm_grad_index3):
